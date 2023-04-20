@@ -8,7 +8,7 @@ import numpy as np
 
 from scipy import linalg
 
-from ._base import BaseMixture, _check_shape
+from ._base import BaseMixture, _check_shape, _check_normalize_sample_weight
 from ..utils import check_array
 from ..utils.extmath import row_norms
 from ..utils._param_validation import StrOptions
@@ -152,7 +152,7 @@ def _check_precisions(precisions, covariance_type, n_components, n_features):
 # Gaussian mixture parameters estimators (used by the M-Step)
 
 
-def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar):
+def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar, sample_weight):
     """Estimate the full covariance matrices.
 
     Parameters
@@ -167,6 +167,8 @@ def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar):
 
     reg_covar : float
 
+    sample_weight : array-like, shape (n_samples,)
+
     Returns
     -------
     covariances : array, shape (n_components, n_features, n_features)
@@ -176,12 +178,13 @@ def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar):
     covariances = np.empty((n_components, n_features, n_features))
     for k in range(n_components):
         diff = X - means[k]
-        covariances[k] = np.dot(resp[:, k] * diff.T, diff) / nk[k]
+        weighted_resp = resp * sample_weight[:, np.newaxis]
+        covariances[k] = np.dot(weighted_resp[:, k] * diff.T, diff) / nk[k]
         covariances[k].flat[:: n_features + 1] += reg_covar
     return covariances
 
 
-def _estimate_gaussian_covariances_tied(resp, X, nk, means, reg_covar):
+def _estimate_gaussian_covariances_tied(resp, X, nk, means, reg_covar, sample_weight):
     """Estimate the tied covariance matrix.
 
     Parameters
@@ -196,12 +199,14 @@ def _estimate_gaussian_covariances_tied(resp, X, nk, means, reg_covar):
 
     reg_covar : float
 
+    sample_weight : array-like, shape (n_samples,)
+
     Returns
     -------
     covariance : array, shape (n_features, n_features)
         The tied covariance matrix of the components.
     """
-    avg_X2 = np.dot(X.T, X)
+    avg_X2 = np.dot(X.T, X * sample_weight[:, np.newaxis])
     avg_means2 = np.dot(nk * means.T, means)
     covariance = avg_X2 - avg_means2
     covariance /= nk.sum()
@@ -209,7 +214,7 @@ def _estimate_gaussian_covariances_tied(resp, X, nk, means, reg_covar):
     return covariance
 
 
-def _estimate_gaussian_covariances_diag(resp, X, nk, means, reg_covar):
+def _estimate_gaussian_covariances_diag(resp, X, nk, means, reg_covar, sample_weight):
     """Estimate the diagonal covariance vectors.
 
     Parameters
@@ -224,18 +229,21 @@ def _estimate_gaussian_covariances_diag(resp, X, nk, means, reg_covar):
 
     reg_covar : float
 
+    sample_weight : array-like, shape (n_samples,)
+
     Returns
     -------
     covariances : array, shape (n_components, n_features)
         The covariance vector of the current components.
     """
-    avg_X2 = np.dot(resp.T, X * X) / nk[:, np.newaxis]
+    weighted_resp = resp * sample_weight[:, np.newaxis]
+    avg_X2 = np.dot(weighted_resp.T, X * X) / nk[:, np.newaxis]
     avg_means2 = means**2
-    avg_X_means = means * np.dot(resp.T, X) / nk[:, np.newaxis]
+    avg_X_means = means * np.dot(weighted_resp.T, X) / nk[:, np.newaxis]
     return avg_X2 - 2 * avg_X_means + avg_means2 + reg_covar
 
 
-def _estimate_gaussian_covariances_spherical(resp, X, nk, means, reg_covar):
+def _estimate_gaussian_covariances_spherical(resp, X, nk, means, reg_covar, sample_weight):
     """Estimate the spherical variance values.
 
     Parameters
@@ -250,15 +258,17 @@ def _estimate_gaussian_covariances_spherical(resp, X, nk, means, reg_covar):
 
     reg_covar : float
 
+    sample_weight : array-like, shape (n_samples,)
+
     Returns
     -------
     variances : array, shape (n_components,)
         The variance values of each components.
     """
-    return _estimate_gaussian_covariances_diag(resp, X, nk, means, reg_covar).mean(1)
+    return _estimate_gaussian_covariances_diag(resp, X, nk, means, reg_covar, sample_weight).mean(1)
 
 
-def _estimate_gaussian_parameters(X, resp, reg_covar, covariance_type):
+def _estimate_gaussian_parameters(X, resp, reg_covar, covariance_type, sample_weight):
     """Estimate the Gaussian distribution parameters.
 
     Parameters
@@ -275,6 +285,9 @@ def _estimate_gaussian_parameters(X, resp, reg_covar, covariance_type):
     covariance_type : {'full', 'tied', 'diag', 'spherical'}
         The type of precision matrices.
 
+    sample_weight : array-like, shape (n_samples,)
+        The weights for each observation in X.
+
     Returns
     -------
     nk : array-like of shape (n_components,)
@@ -287,14 +300,14 @@ def _estimate_gaussian_parameters(X, resp, reg_covar, covariance_type):
         The covariance matrix of the current components.
         The shape depends of the covariance_type.
     """
-    nk = resp.sum(axis=0) + 10 * np.finfo(resp.dtype).eps
-    means = np.dot(resp.T, X) / nk[:, np.newaxis]
+    nk = (resp * sample_weight[:, np.newaxis]).sum(axis=0) + 10 * np.finfo(resp.dtype).eps
+    means = np.dot(resp.T, X * sample_weight[:, np.newaxis])  / nk[:, np.newaxis]
     covariances = {
         "full": _estimate_gaussian_covariances_full,
         "tied": _estimate_gaussian_covariances_tied,
         "diag": _estimate_gaussian_covariances_diag,
         "spherical": _estimate_gaussian_covariances_spherical,
-    }[covariance_type](resp, X, nk, means, reg_covar)
+    }[covariance_type](resp, X, nk, means, reg_covar, sample_weight)
     return nk, means, covariances
 
 
@@ -392,7 +405,7 @@ def _compute_log_det_cholesky(matrix_chol, covariance_type, n_features):
     return log_det_chol
 
 
-def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type):
+def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type, sample_weight):
     """Estimate the log Gaussian probability.
 
     Parameters
@@ -421,6 +434,7 @@ def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type):
     # matrix.
     # In short: det(precision_chol) = - det(precision) / 2
     log_det = _compute_log_det_cholesky(precisions_chol, covariance_type, n_features)
+    log_det_weighted = - 0.0 * np.log(sample_weight)
 
     if covariance_type == "full":
         log_prob = np.empty((n_samples, n_components))
@@ -451,7 +465,7 @@ def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type):
         )
     # Since we are using the precision of the Cholesky decomposition,
     # `- 0.5 * log_det_precision` becomes `+ log_det_precision_chol`
-    return -0.5 * (n_features * np.log(2 * np.pi) + log_prob) + log_det
+    return -0.5 * (n_features * np.log(2 * np.pi) + log_prob) + log_det + log_det_weighted[:, np.newaxis]
 
 
 class GaussianMixture(BaseMixture):
@@ -701,7 +715,7 @@ class GaussianMixture(BaseMixture):
                 n_features,
             )
 
-    def _initialize(self, X, resp):
+    def _initialize(self, X, resp, sample_weight):
         """Initialization of the Gaussian mixture parameters.
 
         Parameters
@@ -709,13 +723,16 @@ class GaussianMixture(BaseMixture):
         X : array-like of shape (n_samples, n_features)
 
         resp : array-like of shape (n_samples, n_components)
+
+        sample_weight : array-like, shape (n_samples,)
         """
-        n_samples, _ = X.shape
+        #n_samples, _ = X.shape
+        sum_weight = np.sum(sample_weight)
 
         weights, means, covariances = _estimate_gaussian_parameters(
-            X, resp, self.reg_covar, self.covariance_type
+            X, resp, self.reg_covar, self.covariance_type, sample_weight
         )
-        weights /= n_samples
+        weights /= sum_weight
 
         self.weights_ = weights if self.weights_init is None else self.weights_init
         self.means_ = means if self.means_init is None else self.means_init
@@ -739,7 +756,7 @@ class GaussianMixture(BaseMixture):
         else:
             self.precisions_cholesky_ = np.sqrt(self.precisions_init)
 
-    def _m_step(self, X, log_resp):
+    def _m_step(self, X, log_resp, sample_weight):
         """M step.
 
         Parameters
@@ -749,18 +766,21 @@ class GaussianMixture(BaseMixture):
         log_resp : array-like of shape (n_samples, n_components)
             Logarithm of the posterior probabilities (or responsibilities) of
             the point of each sample in X.
+
+        sample_weight : array-like, shape (n_samples,)
         """
+        sum_weight = np.sum(sample_weight)
         self.weights_, self.means_, self.covariances_ = _estimate_gaussian_parameters(
-            X, np.exp(log_resp), self.reg_covar, self.covariance_type
+            X, np.exp(log_resp), self.reg_covar, self.covariance_type, sample_weight
         )
-        self.weights_ /= self.weights_.sum()
+        self.weights_ /= sum_weight #self.weights_.sum()
         self.precisions_cholesky_ = _compute_precision_cholesky(
             self.covariances_, self.covariance_type
         )
 
-    def _estimate_log_prob(self, X):
+    def _estimate_log_prob(self, X, sample_weight):
         return _estimate_log_gaussian_prob(
-            X, self.means_, self.precisions_cholesky_, self.covariance_type
+            X, self.means_, self.precisions_cholesky_, self.covariance_type, sample_weight
         )
 
     def _estimate_log_weights(self):
@@ -814,7 +834,7 @@ class GaussianMixture(BaseMixture):
         mean_params = n_features * self.n_components
         return int(cov_params + mean_params + self.n_components - 1)
 
-    def bic(self, X):
+    def bic(self, X, sample_weight=None):
         """Bayesian information criterion for the current model on the input X.
 
         You can refer to this :ref:`mathematical section <aic_bic>` for more
@@ -825,16 +845,19 @@ class GaussianMixture(BaseMixture):
         X : array of shape (n_samples, n_dimensions)
             The input samples.
 
+        sample_weight : array-like, shape (n_samples,)
+
         Returns
         -------
         bic : float
             The lower the better.
         """
-        return -2 * self.score(X) * X.shape[0] + self._n_parameters() * np.log(
-            X.shape[0]
+        sample_weight = _check_normalize_sample_weight(sample_weight, X)
+        return -2 * self.score(X, sample_weight=sample_weight) * X.shape[0] + self._n_parameters() * np.log(
+            np.sum(sample_weight)#X.shape[0]
         )
 
-    def aic(self, X):
+    def aic(self, X, sample_weight=None):
         """Akaike information criterion for the current model on the input X.
 
         You can refer to this :ref:`mathematical section <aic_bic>` for more
@@ -845,9 +868,12 @@ class GaussianMixture(BaseMixture):
         X : array of shape (n_samples, n_dimensions)
             The input samples.
 
+        sample_weight : array-like, shape (n_samples,)
+
         Returns
         -------
         aic : float
             The lower the better.
         """
-        return -2 * self.score(X) * X.shape[0] + 2 * self._n_parameters()
+        sample_weight = _check_normalize_sample_weight(sample_weight, X)
+        return -2 * self.score(X, sample_weight=sample_weight) * X.shape[0] + 2 * self._n_parameters()
